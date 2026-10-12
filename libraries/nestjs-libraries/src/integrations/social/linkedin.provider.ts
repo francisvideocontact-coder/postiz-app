@@ -61,15 +61,12 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
   oneTimeToken = true;
 
   isBetweenSteps = false;
-  scopes = [
-    'openid',
-    'profile',
-    'w_member_social',
-    'r_basicprofile',
-    'rw_organization_admin',
-    'w_organization_social',
-    'r_organization_social',
-  ];
+  // Personal profile only: the LinkedIn app has "Share on LinkedIn" and
+  // "Sign In with LinkedIn using OpenID Connect", which grant these 3 scopes.
+  // The 4 organization scopes need the Community Management API, which must be
+  // the only product of an app, so asking for them makes LinkedIn refuse the
+  // connection.
+  scopes = ['openid', 'profile', 'w_member_social'];
   override maxConcurrentJob = 8; // LinkedIn limits are daily budgets
   refreshWait = true;
   editor = 'normal' as const;
