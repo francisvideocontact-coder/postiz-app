@@ -297,7 +297,10 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     // descriptor for videos, which are streamed chunk-by-chunk from the source
     // instead of being held in memory.
     picture: Buffer | { path: string },
-    type = 'personal' as 'company' | 'personal'
+    type = 'personal' as 'company' | 'personal',
+    // Custom thumbnail of the media (public URL), sent as the video's
+    // thumbnail. Ignored for images and documents.
+    thumbnailUrl?: string
   ): Promise<{
     id: string;
     poll?: { urn: string; endpoint: 'videos' | 'images' | 'documents' };
@@ -306,6 +309,18 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     // Determine the appropriate endpoint based on file type
     const isVideo = hasExtension(fileName, 'mp4');
     const isPdf = hasExtension(fileName, 'pdf');
+
+    // Read the custom thumbnail before asking LinkedIn for its upload URL, so a
+    // thumbnail that cannot be read never leaves the video waiting for one.
+    // Without it, LinkedIn generates its own thumbnail, as before.
+    let thumbnailBuffer: Buffer | undefined;
+    if (isVideo && thumbnailUrl) {
+      try {
+        thumbnailBuffer = await this.prepareMediaBuffer(thumbnailUrl);
+      } catch {
+        thumbnailBuffer = undefined;
+      }
+    }
 
     const fileSizeBytes = Buffer.isBuffer(picture)
       ? picture.length
@@ -321,7 +336,15 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
     }
 
     const {
-      value: { uploadUrl, image, video, document, uploadInstructions, ...all },
+      value: {
+        uploadUrl,
+        image,
+        video,
+        document,
+        uploadInstructions,
+        thumbnailUploadUrl,
+        ...all
+      },
     } = await (
       await this.fetch(
         `https://api.linkedin.com/rest/${endpoint}?action=initializeUpload`,
@@ -343,7 +366,7 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
                 ? {
                     fileSizeBytes,
                     uploadCaptions: false,
-                    uploadThumbnail: false,
+                    uploadThumbnail: !!thumbnailBuffer,
                   }
                 : {}),
             },
@@ -414,6 +437,33 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
         0,
         true
       );
+    }
+
+    // Videos API, "Upload Thumbnail": the image goes to the URL returned by
+    // initializeUpload when uploadThumbnail was true. A failed thumbnail must
+    // not fail the post: the video keeps LinkedIn's own thumbnail.
+    if (isVideo && thumbnailBuffer && thumbnailUploadUrl) {
+      try {
+        await this.fetch(
+          thumbnailUploadUrl,
+          {
+            method: 'PUT',
+            headers: {
+              'X-Restli-Protocol-Version': '2.0.0',
+              'LinkedIn-Version': '202601',
+              Authorization: `Bearer ${accessToken}`,
+              'media-type-family': 'STILLIMAGE',
+              'Content-Type': 'application/octet-stream',
+            },
+            body: thumbnailBuffer,
+          },
+          'linkedin',
+          0,
+          true
+        );
+      } catch {
+        // keep going without the custom thumbnail
+      }
     }
 
     if (isVideo) {
@@ -628,7 +678,8 @@ export class LinkedinProvider extends SocialAbstract implements SocialProvider {
           accessToken,
           personId,
           mediaBuffer,
-          type
+          type,
+          media.thumbnail
         );
 
         if (!uploaded?.id) {
