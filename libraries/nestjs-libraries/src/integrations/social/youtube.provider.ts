@@ -24,6 +24,8 @@ import { createReadStream, statSync } from 'fs';
 import { getSsrfSafeDispatcher } from '@gitroom/nestjs-libraries/dtos/webhooks/ssrf.safe.dispatcher';
 import { setHeartbeatDetails } from '@gitroom/nestjs-libraries/temporal/temporal.heartbeat';
 import { Rules } from '@gitroom/nestjs-libraries/chat/rules.description.decorator';
+import { Context } from '@temporalio/activity';
+import { setThumbnailWithRetry } from '@gitroom/nestjs-libraries/integrations/social/youtube.thumbnail';
 
 const clientAndYoutube = () => {
   const client = new google.auth.OAuth2({
@@ -811,24 +813,49 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
     }
 
     if (pendingData.thumbnail) {
+      // Studio Caillou: the video is live at this point. A thumbnail failure
+      // is logged with the raw Google answer and retried when it can pass
+      // later, but it never fails the post: failing it left the post in ERROR
+      // without releaseURL, and a repost duplicated the video.
       const { client, youtube } = clientAndYoutube();
       client.setCredentials({ access_token: accessToken });
       const youtubeClient = youtube(client);
+      const thumbnailVideoId = String(videoId);
 
-      await this.runInConcurrent(async () =>
-        youtubeClient.thumbnails.set({
-          videoId,
-          media: {
-            body: (
-              await this.getSsrfSafeAxios()({
-                url: pendingData.thumbnail,
-                method: 'GET',
-                responseType: 'stream',
-              })
-            ).data,
-          },
-        })
-      );
+      await setThumbnailWithRetry({
+        videoId: thumbnailVideoId,
+        attempt: async () => {
+          setHeartbeatDetails('youtube: set thumbnail');
+          return youtubeClient.thumbnails.set({
+            videoId: thumbnailVideoId,
+            media: {
+              body: (
+                await this.getSsrfSafeAxios()({
+                  url: pendingData.thumbnail,
+                  method: 'GET',
+                  responseType: 'stream',
+                })
+              ).data,
+            },
+          });
+        },
+        diagnose: async () => {
+          const { data } = await youtubeClient.videos.list({
+            id: [thumbnailVideoId],
+            part: ['status', 'processingDetails'],
+          });
+          const item = data?.items?.[0];
+          return `uploadStatus=${item?.status?.uploadStatus ?? 'unknown'} processingStatus=${
+            item?.processingDetails?.processingStatus ?? 'unknown'
+          } privacyStatus=${item?.status?.privacyStatus ?? 'unknown'}`;
+        },
+        sleep: (ms) => {
+          setHeartbeatDetails('youtube: wait before the next thumbnail try');
+          return new Promise((resolve) => setTimeout(resolve, ms));
+        },
+        log: (line) => console.warn(line),
+        deadline: YoutubeProvider.thumbnailDeadline(),
+      });
     }
 
     return {
@@ -836,6 +863,26 @@ export class YoutubeProvider extends SocialAbstract implements SocialProvider {
       postId: videoId,
       releaseURL: `https://www.youtube.com/watch?v=${videoId}`,
     };
+  }
+
+  // Studio Caillou: when the thumbnail retries must stop so that the running
+  // activity never reaches its startToCloseTimeout (10 minutes in the oldest
+  // workflows, 30 in the current ones). Outside an activity, or if Temporal
+  // does not expose the timeout, only the first two waits fit.
+  private static thumbnailDeadline(): number {
+    try {
+      const info = (Context.current() as any)?.info;
+      const timeout = Number(info?.startToCloseTimeoutMs);
+      const scheduled = Number(
+        info?.currentAttemptScheduledTimestampMs ?? info?.scheduledTimestampMs
+      );
+      if (timeout > 0 && scheduled > 0) {
+        return scheduled + timeout - 60_000;
+      }
+    } catch (err) {
+      /**empty - not inside an activity**/
+    }
+    return Date.now() + 3 * 60_000;
   }
 
   // Old blocking behavior, kept for workflow versions before v1.0.6 that still
