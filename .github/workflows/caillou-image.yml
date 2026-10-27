@@ -33,7 +33,7 @@ jobs:
         run: |
           docker buildx build --platform linux/amd64 \
             -f Dockerfile.dev \
-            --build-arg NEXT_PUBLIC_VERSION=v2.25.1-caillou2 \
+            --build-arg NEXT_PUBLIC_VERSION=v2.25.1-caillou3 \
             --provenance=false --sbom=false \
-            -t ghcr.io/${{ github.repository_owner }}/postiz-app:v2.25.1-caillou2 \
+            -t ghcr.io/${{ github.repository_owner }}/postiz-app:v2.25.1-caillou3 \
             --push .
